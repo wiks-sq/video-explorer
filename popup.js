@@ -1,5 +1,5 @@
 import { scanPage, downloadInPage, installWatcher } from './scanner.js';
-import { DEFAULTS, loadSettings, watchSettings, resolve } from './settings.js';
+import { DEFAULTS, loadSettings, watchSettings, resolve, loadEnabled, setEnabled, watchEnabled } from './settings.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2284,7 +2284,51 @@ window.addEventListener('blur', closeCmdMenu);
 // Init
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// On/off switch
+// ---------------------------------------------------------------------------
+
+const power = $('#power');
+
+function showPower(on) {
+  power.checked = on;
+  $('#power-label').textContent = on ? 'On' : 'Off';
+  power.closest('.power').title = on ? 'Turn Video Explorer off' : 'Turn Video Explorer on';
+  power.setAttribute('aria-label', on ? 'Video Explorer on' : 'Video Explorer off');
+}
+
+function showOff() {
+  document.body.classList.add('off');
+  els.pageInfo.textContent = 'Turned off';
+  els.content.innerHTML = `<div class="empty off-msg"><div>
+    <img src="icons/icon128-off.png" width="64" height="64" alt="" />
+    <strong>Video Explorer is off</strong>
+    <p>It doesn’t look at pages or their network traffic, and doesn’t load anything from any site. Downloads you already started keep going.</p>
+    <button id="turn-on" class="btn primary" type="button">Turn on</button>
+  </div></div>`;
+  $('#turn-on').addEventListener('click', () => switchPower(true));
+}
+
+async function switchPower(on) {
+  showPower(on);
+  await setEnabled(on);
+  // Start over: turning off drops everything in flight, turning on scans from scratch.
+  location.reload();
+}
+
+power.addEventListener('change', () => switchPower(power.checked));
+
 async function init() {
+  const on = await loadEnabled();
+  showPower(on);
+  // Switched in another window: follow along.
+  watchEnabled((now) => {
+    if (now !== power.checked) location.reload();
+  });
+  if (!on) {
+    showOff();
+    return;
+  }
   try {
     const stored = await chrome.storage.local.get('prefs');
     Object.assign(prefs, stored.prefs || {});

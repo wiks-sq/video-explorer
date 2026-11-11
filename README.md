@@ -42,6 +42,10 @@ Click the toolbar icon to see every video file and GIF on the current page. Each
 - **Live updates:** while the popup is open, the list keeps updating. New videos are added as the page inserts them, as a player loads them, or as they show up in network traffic. Each one gets a short highlight and a "new video found" message, and the footer shows a green **LIVE** dot. Navigating to a new page starts the list fresh.
 - **Download all** downloads every file that matches the current filter. It asks you to confirm when there are more than 3. Files download 4 at a time (at most 2 from one site), and the rest wait their turn. This keeps going after you close the popup. **Copy all links** copies them as one link per line.
 
+## Turning it off
+
+The switch at the top of the popup turns Video Explorer off. While it's off, it doesn't look at pages or their network traffic, doesn't load anything from any site, and forgets the videos it had already noticed. The toolbar icon turns grey. Downloads you already started with **Download all** still finish. Turn it back on from the same switch, or the **Turn on** button in the popup. It stays off until you do, even after Chrome restarts.
+
 ## How videos and GIFs are found
 
 - `<video>` and `<source>` elements, including inside open shadow DOM and iframes
@@ -102,7 +106,8 @@ If a site still struggles, set **Thumbnails and lengths** to Off and **File size
 - `popup.html / popup.css / popup.js`: the explorer UI
 - `options.html / options.css / options.js`: the settings page
 - `settings.js`: setting defaults and what they mean, shared by the popup, the settings page and the background worker
-- `icons/`: toolbar icons
+- `icons/`: toolbar icons, with grey `-off` versions for when it's switched off
+- `store/`: Chrome Web Store screenshots and promo tiles, and the logo as SVG (`logo.svg`, and `logo-16.svg` for the small sizes)
 
 ## License
 

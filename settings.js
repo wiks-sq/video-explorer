@@ -69,3 +69,27 @@ export function resolve(s) {
     commandRetry: s.commandRetry !== 'off',
   };
 }
+
+// The on/off switch in the popup. Kept apart from the settings above, which
+// "Reset all to Auto" puts back; that shouldn't turn the extension on.
+export const ENABLED_KEY = 'enabled';
+
+export async function loadEnabled() {
+  try {
+    const { [ENABLED_KEY]: on } = await chrome.storage.local.get(ENABLED_KEY);
+    return on !== false;
+  } catch {
+    return true;
+  }
+}
+
+export function setEnabled(on) {
+  return chrome.storage.local.set({ [ENABLED_KEY]: !!on });
+}
+
+/** Call `cb(on)` when the extension is switched on or off. */
+export function watchEnabled(cb) {
+  chrome.storage.onChanged?.addListener((changes, area) => {
+    if (area === 'local' && changes[ENABLED_KEY]) cb(changes[ENABLED_KEY].newValue !== false);
+  });
+}

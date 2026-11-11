@@ -15,7 +15,7 @@ All of it stays in your browser:
 
 - The list of videos found on each tab is kept in memory only. It's cleared when the tab goes to a new page or closes, and when the browser closes.
 - File sizes, lengths and resolutions it has looked up are kept in memory until the browser closes, so reopening the popup doesn't ask the site again. You can turn this off or clear it on the settings page.
-- Your view choices (layout, sorting, grouping, hidden formats) and settings are saved in Chrome's local extension storage on your computer.
+- Your view choices (layout, sorting, grouping, hidden formats), settings, and whether it's switched on are saved in Chrome's local extension storage on your computer.
 
 ## What it sends, and to whom
 
@@ -31,6 +31,10 @@ When you copy a download command, it's put on your clipboard, nowhere else. By d
 ## Limited use
 
 Video Explorer uses the data above only to show and download the videos and GIFs on the page you're viewing. It doesn't sell or transfer user data, and doesn't use it for anything unrelated to that purpose, such as advertising or creditworthiness. Its use of information follows the [Chrome Web Store User Data Policy](https://developer.chrome.com/docs/webstore/program-policies/), including the Limited Use requirements.
+
+## Turning it off
+
+The switch at the top of the popup turns Video Explorer off. While it's off, it reads nothing from pages or network traffic, makes no requests, and deletes the list of videos it had kept for each tab. Only downloads you had already started continue.
 
 ## Changes and contact
 

@@ -2,7 +2,7 @@
 // every response that looks like a video or GIF (including ones loaded by
 // players via XHR/fetch that never appear as a plain URL in the page's HTML).
 
-import { DEFAULTS, loadSettings, watchSettings, resolve } from './settings.js';
+import { DEFAULTS, loadSettings, watchSettings, resolve, loadEnabled, watchEnabled } from './settings.js';
 
 const VIDEO_EXT = /\.(mp4|m4v|webm|ogv|mov|mkv|avi|wmv|flv|3gp|3g2|mpe?g|m3u8|mpd)$/i;
 // DASH segments (.m4s): listed, whatever content type they're served with
@@ -29,10 +29,43 @@ watchSettings((s) => {
   pumpDownloads();
 });
 
+// The popup's on/off switch. Off: nothing is recorded, and the toolbar icon is grey.
+let enabled = true;
+const enabledLoaded = loadEnabled().then((on) => {
+  enabled = on;
+  showEnabled();
+});
+watchEnabled((on) => {
+  enabled = on;
+  showEnabled();
+  if (!on) ready.then(forgetAllTabs);
+});
+// The icon isn't kept across browser restarts.
+chrome.runtime.onStartup?.addListener(() => enabledLoaded.then(showEnabled));
+chrome.runtime.onInstalled?.addListener(() => enabledLoaded.then(showEnabled));
+
+function showEnabled() {
+  const suffix = enabled ? '' : '-off';
+  const path = Object.fromEntries([16, 32, 48, 128].map((n) => [n, `icons/icon${n}${suffix}.png`]));
+  chrome.action?.setIcon({ path }).catch(() => {});
+  chrome.action?.setTitle({ title: enabled ? 'Video Explorer' : 'Video Explorer (off)' }).catch(() => {});
+}
+
+function forgetAllTabs() {
+  for (const t of saveTimers.values()) clearTimeout(t);
+  saveTimers.clear();
+  tabs.clear();
+  chrome.storage.session
+    .get(null)
+    .then((all) => chrome.storage.session.remove(Object.keys(all).filter((k) => k.startsWith('tab_'))))
+    .catch(() => {});
+}
+
 const ready = chrome.storage.session
   .get(null)
   .then(async (all) => {
     await settingsLoaded;
+    await enabledLoaded;
     for (const [key, list] of Object.entries(all)) {
       if (!key.startsWith('tab_') || !Array.isArray(list)) continue;
       tabs.set(Number(key.slice(4)), new Map(list.map((it) => [it.url, it])));
@@ -80,8 +113,9 @@ function normaliseUrl(raw) {
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     // Any request, the page's own or ours (thumbnails, sizes, downloads).
-    if (details.statusCode === 429 || details.statusCode === 503) noteRateLimit(details);
-    if (details.tabId < 0 || details.statusCode >= 400) return;
+    // When switched off, only "Download all" (already started) still cares.
+    if ((details.statusCode === 429 || details.statusCode === 503) && (enabled || downloadsPending())) noteRateLimit(details);
+    if (!enabled || details.tabId < 0 || details.statusCode >= 400) return;
     const u = normaliseUrl(details.url);
     if (!u || !/^https?:$/.test(u.protocol)) return;
     const path = u.pathname;
@@ -114,6 +148,7 @@ chrome.webRequest.onHeadersReceived.addListener(
     if (isGif && size != null && size < MIN_GIF_BYTES) return;
 
     ready.then(() => {
+      if (!enabled) return;
       let map = tabs.get(details.tabId);
       if (!map) tabs.set(details.tabId, (map = new Map()));
       const url = u.href;
@@ -257,6 +292,10 @@ let dl = { queue: [], active: {} };
 let dlBusy = false;
 let dlTimer = null;
 let dlLastStart = 0;
+
+function downloadsPending() {
+  return dl.queue.length > 0 || Object.keys(dl.active).length > 0;
+}
 
 function saveDl() {
   chrome.storage.session.set({ [DL_KEY]: dl }).catch(() => {});
