@@ -32,15 +32,15 @@ Click the toolbar icon to see every video file and GIF on the current page. Each
 - **Filter:** type to search names, links, titles and formats. Press `/` to jump to the filter box.
 - Your view, grouping and sort choices are saved between uses.
 - **Download commands:** the small ▾ next to every Download button opens a menu that copies a ready-to-paste command for that file. Pick **macOS / Linux** or **Windows** at the top (it's remembered, and it starts on the system you're using):
-  - **macOS / Linux:** `curl` (built in), `wget` (most Linux; `brew install wget` on macOS), `yt-dlp`, `aria2c` (8 connections at once, often much faster).
+  - **macOS / Linux:** `curl` (built in), `wget` (most Linux; `brew install wget` on macOS), `yt-dlp`, `aria2c` (4 connections at once, often much faster).
   - **Windows** (PowerShell / Windows Terminal): `curl.exe` (built into Windows 10 and 11), PowerShell `Invoke-WebRequest` (nothing to install), `yt-dlp`, `aria2c`.
   - **Streaming playlists (M3U8 / MPD)** list `ffmpeg` and `yt-dlp` first, because they download the whole stream into one MP4; curl/wget would only save the playlist file.
   - By default the commands send the page as `Referer` and your browser's `User-Agent`, which many sites require. Untick the box in the menu to leave them out. Cookies are never included; if a site needs you to be logged in, try `yt-dlp --cookies-from-browser chrome <link>`.
-  - **Download all** has the same ▾. It copies commands for every file currently shown, so search, the All / Videos / GIFs switch and the Formats menu decide what's included. curl, wget, PowerShell and yt-dlp get one line per file, run one after another. aria2c gets the whole list at once and downloads 4 files at a time. Streaming playlists in the list get an ffmpeg line (or yt-dlp) automatically. Files that would end up with the same name are numbered (`episode10.mp4`, `episode10 (2).mp4`) so nothing gets overwritten. `blob:` files can't be included, and the menu says how many were left out.
+  - **Download all** has the same ▾. It copies commands for every file currently shown, so search, the All / Videos / GIFs switch and the Formats menu decide what's included. curl, wget, PowerShell and yt-dlp get one line per file, run one after another. aria2c gets the whole list at once and downloads 2 files at a time. Streaming playlists in the list get an ffmpeg line (or yt-dlp) automatically. Files that would end up with the same name are numbered (`episode10.mp4`, `episode10 (2).mp4`) so nothing gets overwritten. `blob:` files can't be included, and the menu says how many were left out.
   - Everything is single-quoted for the chosen shell, so links with `&`, `$`, spaces or quotes paste safely. `blob:` and inline items have no link a command could use, so their ▾ is disabled.
 - **Hover preview:** hold the mouse over a thumbnail (or over a file name in List and Details) and a small window plays the video or GIF. It starts muted. If you move the mouse into the window you can use its controls, including unmuting and full screen. Once you unmute, later previews keep the sound on. Press `Esc` to close it. 
 - **Live updates:** while the popup is open, the list keeps updating. New videos are added as the page inserts them, as a player loads them, or as they show up in network traffic. Each one gets a short highlight and a "new video found" message, and the footer shows a green **LIVE** dot. Navigating to a new page starts the list fresh.
-- **Download all** downloads every file that matches the current filter. It asks you to confirm when there are more than 3. **Copy all links** copies them as one link per line.
+- **Download all** downloads every file that matches the current filter. It asks you to confirm when there are more than 3. Files download 4 at a time (at most 2 from one site), and the rest wait their turn. This keeps going after you close the popup. **Copy all links** copies them as one link per line.
 
 ## How videos and GIFs are found
 
@@ -54,6 +54,37 @@ Click the toolbar icon to see every video file and GIF on the current page. Each
 
 Sizes come from response headers, using a HEAD request or a 1-byte range request when needed. Resolution and duration come from loading each video's metadata.
 
+## Avoiding "too many requests"
+
+Thumbnails, sizes and lengths are fetched from the site's own servers, so they count against the same limits as the page itself. The popup can't reuse what the page already loaded: Chrome keeps a separate cache for each site and the extension counts as a different one, the page often shows only a preview and loads the real file when you press play, and sizes need a request of their own. If the extension asks for too much at once, some sites answer "429 Too Many Requests" and the page's own videos stop loading.
+
+Everything below is what the **Auto** settings do. Each of them can be changed on the settings page.
+
+- **Only what you can see is loaded.** Thumbnails load for the files on screen (and just around them) as you scroll, not for the whole list. List view loads no thumbnails at all, and Details only loads a file when its resolution or length is missing. Sorting by Duration or Resolution is the exception: it needs every file's metadata, so it loads them all, slowly.
+- **A couple at a time.** At most 2 requests to a site at once, spaced out, with what's on screen first.
+- **Backs off when asked.** When a site answers 429 (or 503), loading from that site pauses for as long as it asks (its `Retry-After` header), or else 10 seconds, doubling each time it happens again, up to 2 minutes. The footer shows a yellow note with a countdown. After the pause, files load one at a time for a minute, and anything that was refused is tried again. This also applies when the page's own requests are refused, which the background worker can see.
+- **Remembered.** Sizes, resolutions and lengths are kept until the browser closes, so reopening the popup doesn't ask for them again.
+- **Downloads and commands:** Download all runs a few at a time and retries downloads the server refused or dropped. The copied curl and wget commands retry after a 429, and aria2c uses fewer connections.
+
+## Settings
+
+The settings page has no button in the popup. To open it, right-click the Video Explorer toolbar icon and choose **Options**, or go to `chrome://extensions`, click **Details** under Video Explorer, then **Extension options**. Every setting starts on **Auto**. Changes are saved right away and apply to an open popup immediately. Anything that isn't Auto is marked **Changed**, and **Reset all to Auto** undoes everything.
+
+| Setting | Auto | Other choices |
+| --- | --- | --- |
+| Thumbnails and lengths | As files scroll into view | All files when the popup opens; Off (no thumbnails and no requests for them; hover previews still play) |
+| File sizes | Look up missing sizes | Only what the page revealed (no requests) |
+| Requests at once, per site | 2, or 1 after a refusal | 1 to 8, fixed |
+| Pause between requests | 0.25 s, or 1.5 s after a refusal | None to 2 s, fixed |
+| Remember sizes and lengths | Until the browser closes, with a **Forget** button | Off |
+| When a site says "too many requests" | Pause, then go slower, retrying what was refused | Stop loading from that site until the popup is reopened; Keep going (not recommended) |
+| Download all: files at a time | 4, at most 2 per site | 1 to 8 |
+| Retry failed downloads | Up to 2 times | Off |
+| aria2c connections | 4 per file, 2 for Download all | 1 to 16 |
+| Retry options in commands | On | Off (shorter commands) |
+
+If a site still struggles, set **Thumbnails and lengths** to Off and **File sizes** to Only what the page revealed. Then the popup makes no requests of its own.
+
 ## Limitations
 
 - **`blob:` MediaSource streams** (YouTube, Netflix, most big platforms) are tagged **STREAM** and can't be downloaded directly, because the video only exists as chunks inside the player.
@@ -66,9 +97,11 @@ Sizes come from response headers, using a HEAD request or a 1-byte range request
 ## Files
 
 - `manifest.json`: Manifest V3 config
-- `background.js`: per-tab network capture of video and GIF responses
+- `background.js`: per-tab network capture of video and GIF responses, "too many requests" tracking, and the Download all queue
 - `scanner.js`: functions injected into the page: the scanner, the live-change watcher (which stops when the popup closes) and the in-page blob download helper
 - `popup.html / popup.css / popup.js`: the explorer UI
+- `options.html / options.css / options.js`: the settings page
+- `settings.js`: setting defaults and what they mean, shared by the popup, the settings page and the background worker
 - `icons/`: toolbar icons
 
 ## License

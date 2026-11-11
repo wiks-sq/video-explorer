@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Video Explorer settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <header class="page-head">
+        <img src="icons/icon48.png" width="40" height="40" alt="" />
+        <div>
+          <h1>Video Explorer settings</h1>
+          <p class="muted">Changes are saved right away and apply to an open popup immediately.</p>
+        </div>
+        <button id="reset" class="btn" type="button" title="Set every setting back to Auto">Reset all to Auto</button>
+      </header>
+
+      <div id="sections"></div>
+
+      <section class="card explain">
+        <h2>Why does Video Explorer make its own requests?</h2>
+        <p>
+          Even when a video or GIF is already showing on the page, the popup can’t reuse it. Chrome keeps a separate
+          cache for each site, and the extension counts as a different site, so a thumbnail in the popup is downloaded
+          from the server again. The page also often shows only a preview and loads the real file when you press play,
+          while the extension asks for the file itself. File sizes need a request of their own, and a GIF thumbnail
+          downloads the whole GIF.
+        </p>
+        <p>
+          The server sees all of this as more requests from you, and counts it toward the same limit as the page. That’s
+          why a strict site can start answering “too many requests” and stop showing its own videos. The Auto settings
+          keep requests few and spaced out, and pause when a site pushes back. If a site still has trouble, set
+          <b>Thumbnails and lengths</b> to <b>Off</b> and <b>File sizes</b> to <b>Only what the page revealed</b>. Then
+          the popup makes no extra requests at all.
+        </p>
+      </section>
+    </main>
+
+    <div id="saved" class="saved" role="status" aria-live="polite"></div>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

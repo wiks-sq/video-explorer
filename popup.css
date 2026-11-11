@@ -10,6 +10,8 @@
   --accent-soft: #e6eefd;
   --thumb-bg: #1d1f25;
   --danger: #c2410c;
+  --warn-fg: #92400e;
+  --warn-bg: #fef3c7;
   --radius: 8px;
   color-scheme: light;
 }
@@ -27,6 +29,8 @@
     --accent-soft: #263453;
     --thumb-bg: #0e0f12;
     --danger: #fb923c;
+    --warn-fg: #fcd34d;
+    --warn-bg: #3b2f12;
     color-scheme: dark;
   }
 }
@@ -689,6 +693,26 @@ td .link {
   text-overflow: ellipsis;
 }
 
+/* A site said "too many requests": loading is paused for a while. */
+.net-note {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 290px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  cursor: help;
+}
+.net-note[hidden] {
+  display: none;
+}
+
 .footer-actions {
   display: flex;
   gap: 6px;
@@ -1142,7 +1166,13 @@ tr.is-new {
   color: var(--muted);
 }
 
+/* The OS switch keeps its size; a long title wraps instead of squeezing it. */
+.seg.cm-os {
+  flex: none;
+}
+
 .seg.cm-os button {
+  white-space: nowrap;
   width: auto;
   height: 22px;
   padding: 0 8px;

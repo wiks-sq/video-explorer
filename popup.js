@@ -1,4 +1,5 @@
 import { scanPage, downloadInPage, installWatcher } from './scanner.js';
+import { DEFAULTS, loadSettings, watchSettings, resolve } from './settings.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -81,14 +82,24 @@ const ICON = {
 
 const MAX_PROBES = 80; // how many videos get a metadata/thumbnail probe
 const MAX_GIF_PROBES = 250; // GIF still frames are cheap (usually already in the cache)
-const PROBE_CONCURRENCY = 3;
-const SIZE_CONCURRENCY = 4;
+// Thumbnails, lengths and sizes are fetched from the site's own servers, so
+// they count against the same rate limits as the page. How many at once and
+// how far apart comes from the settings page (`cfg`); these are the fixed parts.
+const NET = {
+  slowGapMs: 1500, // Auto pause between requests after the site pushed back (one at a time)
+  slowForMs: 60000, // how long Auto stays that careful after a pause ends
+  backoffMs: 10000, // first pause after "too many requests"; doubles each time
+  maxBackoffMs: 120000,
+  retries: 2, // a request that hit the limit is retried after the pause
+};
 const POLL_MS = 5000; // safety-net rescan (e.g. shadow DOM changes the watcher can't see)
 const NEW_HIGHLIGHT_MS = 4000;
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+
+let cfg = resolve(DEFAULTS); // settings page choices, see settings.js
 
 const prefs = {
   view: 'icons',
@@ -137,6 +148,7 @@ const els = {
   formats: $('#formats'),
   formatsPop: $('#formats-pop'),
   formatsHidden: $('#formats-hidden'),
+  netNote: $('#net-note'),
 };
 
 // ---------------------------------------------------------------------------
@@ -559,8 +571,7 @@ function resetItems() {
   nextOrder = 0;
   probeCount = 0;
   gifProbeCount = 0;
-  probeQueue.clear();
-  sizeQueue.clear();
+  probeQueued.clear(); // queued work for the old page is dropped by the generation check
   for (const el of thumbCache.values()) {
     if (el instanceof HTMLVideoElement) {
       el.removeAttribute('src');
@@ -580,37 +591,283 @@ function resetItems() {
 // Background work: thumbnails/metadata and file sizes
 // ---------------------------------------------------------------------------
 
-function makeQueue(concurrency) {
-  const queue = [];
-  let active = 0;
-  const pump = () => {
-    while (active < concurrency && queue.length) {
-      const task = queue.shift();
-      active++;
-      Promise.resolve()
-        .then(task)
-        .catch(() => {})
-        .finally(() => {
-          active--;
-          pump();
-        });
-    }
-  };
-  return {
-    push(task) {
-      queue.push(task);
-      pump();
-    },
-    clear() {
-      queue.length = 0;
-    },
-  };
+/**
+ * A request the site refused with "too many requests" (HTTP 429, or 503).
+ * `ms` is how long the site asked us to wait, if it said. `counted` means the
+ * pause is already in place (the background worker reported it), so the
+ * request only needs to be retried.
+ */
+class RateLimited extends Error {
+  constructor(ms = null, counted = false) {
+    super('rate limited');
+    this.ms = ms;
+    this.counted = counted;
+  }
 }
 
-const probeQueue = makeQueue(PROBE_CONCURRENCY);
-const sizeQueue = makeQueue(SIZE_CONCURRENCY);
+/** host -> { host, active, queue, until, strikes, lastStart, timer, headFails } */
+const hosts = new Map();
+let netSeq = 0;
+let netTicker = null;
+
+function hostOf(url) {
+  return safeURL(url)?.host || '';
+}
+
+function hostEntry(host) {
+  let h = hosts.get(host);
+  if (!h) {
+    h = { host, active: 0, queue: [], until: 0, slowUntil: 0, strikes: 0, lastStart: 0, timer: null, headFails: 0 };
+    hosts.set(host, h);
+  }
+  return h;
+}
+
+/**
+ * Run `run()` once the site behind `url` has a free slot: at most cfg.perSite
+ * requests to one site at a time, spaced out, the highest `prio()` first (what's
+ * on screen), and nothing while the site has asked us to back off. `giveUp()`
+ * is called if the task is dropped after too many "too many requests".
+ */
+function netSchedule(url, run, { prio = () => 0, giveUp = () => {} } = {}) {
+  const h = hostEntry(hostOf(url));
+  if (h.stopped) return giveUp();
+  h.queue.push({ run, prio, giveUp, gen: generation, tries: 0, seq: netSeq++ });
+  pumpHost(h);
+}
+
+function pumpHost(h) {
+  clearTimeout(h.timer);
+  h.timer = null;
+  h.queue = h.queue.filter((t) => t.gen === generation);
+  if (h.stopped) {
+    for (const t of h.queue.splice(0)) t.giveUp();
+    return;
+  }
+  while (h.queue.length) {
+    const now = Date.now();
+    // Auto settings slow down for a while after the site pushed back; numbers picked by hand stay as they are.
+    const slow = now < h.slowUntil;
+    if (h.active >= (slow && cfg.perSiteAuto ? 1 : cfg.perSite)) return; // continues when one finishes
+    const gap = slow && cfg.gapAuto ? NET.slowGapMs : cfg.gapMs;
+    const wait = Math.max(h.until - now, h.lastStart + gap - now);
+    if (wait > 0) {
+      h.timer = setTimeout(() => pumpHost(h), wait);
+      return;
+    }
+    // Highest priority first; among equals, the oldest (the queue is in order).
+    let best = 0;
+    let bestPrio = h.queue[0].prio();
+    for (let i = 1; i < h.queue.length; i++) {
+      const p = h.queue[i].prio();
+      if (p > bestPrio) {
+        best = i;
+        bestPrio = p;
+      }
+    }
+    const [task] = h.queue.splice(best, 1);
+    h.active++;
+    h.lastStart = now;
+    Promise.resolve()
+      .then(task.run)
+      .catch((err) => {
+        if (!(err instanceof RateLimited)) return;
+        if (!err.counted) rateLimit(h, err.ms);
+        if (cfg.onLimit === 'auto' && task.tries++ < NET.retries && task.gen === generation) h.queue.unshift(task);
+        else task.giveUp();
+      })
+      .finally(() => {
+        h.active--;
+        pumpHost(h);
+      });
+  }
+}
+
+/**
+ * The site said "too many requests". Auto: pause it, then carry on slowly.
+ * The settings page can instead stop loading from it, or ignore it.
+ */
+function rateLimit(h, ms) {
+  if (cfg.onLimit === 'ignore') return;
+  if (cfg.onLimit === 'stop') {
+    h.stopped = true;
+    pumpHost(h); // drops what was waiting
+    renderNetNote();
+    return;
+  }
+  const now = Date.now();
+  if (h.until <= now) h.strikes++; // a burst of refusals during one pause is one strike
+  const wait = ms ?? Math.min(NET.backoffMs * 2 ** (Math.max(1, h.strikes) - 1), NET.maxBackoffMs);
+  h.until = Math.max(h.until, now + Math.min(Math.max(wait, 1000), 5 * 60000));
+  h.slowUntil = h.until + NET.slowForMs;
+  pumpHost(h);
+  startNetTicker();
+}
+
+/** Footer note while a site with work waiting is paused. Returns false once nothing is paused. */
+function renderNetNote() {
+  const now = Date.now();
+  const paused = [...hosts.values()].filter((h) => h.until > now && !h.stopped);
+  const waiting = paused.filter((h) => h.queue.length);
+  const stopped = [...hosts.values()].filter((h) => h.stopped);
+  els.netNote.hidden = !waiting.length && !stopped.length;
+  if (stopped.length && !waiting.length) {
+    const names = stopped.map((h) => h.host);
+    els.netNote.textContent = `${names.length === 1 ? names[0] : `${names.length} sites`} said too many requests · stopped`;
+    els.netNote.title =
+      `${names.join(', ')} answered “too many requests”, so no more thumbnails or sizes are loaded from ` +
+      `${names.length === 1 ? 'it' : 'them'} until you reopen the popup (as chosen in Settings).`;
+  } else if (waiting.length) {
+    const secs = Math.ceil((Math.max(...waiting.map((h) => h.until)) - now) / 1000);
+    const names = waiting.map((h) => h.host);
+    els.netNote.textContent = `${names.length === 1 ? names[0] : `${names.length} sites`} asked to slow down · ${secs} s`;
+    els.netNote.title =
+      `${names.join(', ')} answered “too many requests”, so loading thumbnails and sizes is paused for ${secs} s. ` +
+      'This keeps the page’s own videos working. Afterwards files load one at a time.';
+  }
+  return paused.length > 0;
+}
+
+function startNetTicker() {
+  renderNetNote();
+  if (netTicker) return;
+  netTicker = setInterval(() => {
+    if (!renderNetNote()) {
+      clearInterval(netTicker);
+      netTicker = null;
+    }
+  }, 1000);
+}
+
+function retryAfterMs(res) {
+  const v = res.headers.get('retry-after');
+  if (!v) return null;
+  const s = Number(v);
+  if (Number.isFinite(s)) return s * 1000;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? Math.max(0, t - Date.now()) : null;
+}
+
+function checkLimited(res, ctrl) {
+  if (res.status !== 429 && res.status !== 503) return;
+  ctrl?.abort();
+  throw new RateLimited(retryAfterMs(res));
+}
+
+/**
+ * A thumbnail or GIF didn't load. Media elements don't expose the HTTP status,
+ * so give the background worker (which does see it) a moment to report a
+ * "too many requests"; if the site has started refusing, retry after the pause.
+ */
+async function checkFailedLoad(url, strikesBefore) {
+  await new Promise((r) => setTimeout(r, 1500));
+  const h = hostEntry(hostOf(url));
+  if (h.strikes > strikesBefore || h.until > Date.now()) throw new RateLimited(null, true);
+}
+
+// Sizes and metadata survive closing the popup (until the browser restarts),
+// so opening it again doesn't ask the site for everything a second time.
+const CACHE_KEY = 'probeCache';
+const CACHE_MAX = 3000;
+let cacheTimer = null;
+
+async function loadProbeCache() {
+  if (!cfg.remember) return;
+  try {
+    const { [CACHE_KEY]: c } = (await chrome.storage.session?.get(CACHE_KEY)) || {};
+    for (const [url, e] of Object.entries(c || {})) {
+      if (e.size != null && !sizeCache.has(url)) sizeCache.set(url, e.size);
+      if (e.meta && !metaCache.has(url)) metaCache.set(url, e.meta);
+    }
+  } catch {
+    /* no cache */
+  }
+}
+
+function saveProbeCache() {
+  if (!cfg.remember) return;
+  clearTimeout(cacheTimer);
+  cacheTimer = setTimeout(() => {
+    const out = {};
+    const urls = [...new Set([...sizeCache.keys(), ...metaCache.keys()])].slice(-CACHE_MAX);
+    for (const url of urls) {
+      const size = sizeCache.get(url);
+      const meta = metaCache.get(url);
+      if (size == null && !meta) continue;
+      out[url] = {};
+      if (size != null) out[url].size = size;
+      if (meta) out[url].meta = meta;
+    }
+    chrome.storage.session?.set({ [CACHE_KEY]: out }).catch(() => {});
+  }, 1000);
+}
+
 let probeCount = 0;
 let gifProbeCount = 0;
+const probeQueued = new Set(); // urls with a probe waiting, running or done
+const visibleIds = new Set(); // items on or near the screen (they get thumbnails)
+const onScreenIds = new Set(); // items actually on screen (they go first)
+
+// Only what's on screen (plus a margin) gets a thumbnail.
+const visibility = new IntersectionObserver(
+  (entries) => {
+    for (const e of entries) {
+      const id = e.target.dataset.item;
+      if (!e.isIntersecting) {
+        visibleIds.delete(id);
+        continue;
+      }
+      visibleIds.add(id);
+      const it = itemById(id);
+      if (it) queueProbe(it);
+    }
+  },
+  { root: els.content, rootMargin: '300px 0px' }
+);
+const onScreen = new IntersectionObserver(
+  (entries) => {
+    for (const e of entries) e.isIntersecting ? onScreenIds.add(e.target.dataset.item) : onScreenIds.delete(e.target.dataset.item);
+  },
+  { root: els.content }
+);
+
+function itemById(id) {
+  return state.items.find((x) => x.id === id);
+}
+
+function observeItems() {
+  visibility.disconnect();
+  onScreen.disconnect();
+  visibleIds.clear();
+  onScreenIds.clear();
+  for (const el of els.content.querySelectorAll('[data-item]')) {
+    visibility.observe(el);
+    onScreen.observe(el);
+  }
+}
+
+/** Queue priority: on screen, then near it, then the rest. */
+function screenPrio(it) {
+  return onScreenIds.has(it.id) ? 2 : visibleIds.has(it.id) ? 1 : 0;
+}
+
+/** Sorting by these needs every file's metadata, not just what's on screen. */
+function needsAllMeta() {
+  return prefs.sortBy === 'duration' || prefs.sortBy === 'resolution';
+}
+
+const VIEWS_WITH_THUMBS = new Set(['icons', 'tiles']);
+
+/** Whether loading this file now is worth a request. */
+function wantProbe(it) {
+  if (cfg.thumbnails === 'off') return false;
+  if (cfg.thumbnails === 'all') return true;
+  const known = it.width != null && (it.kind === 'gif' || it.duration != null);
+  if (needsAllMeta() && !known) return true;
+  if (!visibleIds.has(it.id)) return false;
+  if (VIEWS_WITH_THUMBS.has(prefs.view)) return true;
+  return prefs.view === 'details' && !known; // Details shows resolution and length; List shows neither
+}
 
 /**
  * GIF thumbnails show a still first frame (a canvas) and only animate while
@@ -677,7 +934,7 @@ function getThumb(it) {
   let el = null;
   if (it.kind === 'gif' && !it.isBlob) {
     el = makeGifThumb(it); // the still frame is painted by probeGif()
-  } else if (it.poster) {
+  } else if (it.poster && cfg.thumbnails !== 'off') {
     el = document.createElement('img');
     el.src = it.poster;
     el.alt = '';
@@ -691,6 +948,7 @@ function getThumb(it) {
 /** Store probed metadata for `url`; only applied if it's still the item's main link. */
 function applyMeta(it, meta, url = it.url) {
   metaCache.set(url, meta);
+  saveProbeCache();
   if (it.url !== url) return false;
   let changed = false;
   for (const k of ['width', 'height', 'duration']) {
@@ -702,17 +960,17 @@ function applyMeta(it, meta, url = it.url) {
   return changed;
 }
 
-/** Load the GIF once to read its size and paint the still first-frame thumbnail. */
+/** Load the GIF once to read its size and paint the still first-frame thumbnail. Resolves false if it failed. */
 function probeGif(it) {
   const url = it.url;
   return new Promise((resolve) => {
     const img = new Image();
-    const finish = () => {
+    const finish = (ok) => {
       clearTimeout(timer);
       img.onload = img.onerror = null;
-      resolve();
+      resolve(ok);
     };
-    const timer = setTimeout(finish, 15000);
+    const timer = setTimeout(() => finish(false), 15000);
     // (No img.decode() here: it can hang forever on animated GIFs. drawImage
     // decodes the first frame synchronously.)
     img.onload = () => {
@@ -723,13 +981,14 @@ function probeGif(it) {
         changed = true;
       }
       if (changed) scheduleRender();
-      finish();
+      finish(true);
     };
-    img.onerror = finish;
+    img.onerror = () => finish(false);
     img.src = url;
   });
 }
 
+/** Load a video's metadata and first frame (it becomes the thumbnail). Resolves false if it failed. */
 function probe(it) {
   if (it.kind === 'gif') return probeGif(it);
   const url = it.url;
@@ -740,13 +999,13 @@ function probe(it) {
     v.preload = 'metadata';
     if (it.poster) v.poster = it.poster;
     let done = false;
-    const finish = () => {
+    const finish = (ok) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve();
+      resolve(ok);
     };
-    const timer = setTimeout(finish, 10000);
+    const timer = setTimeout(() => finish(false), 10000);
     v.addEventListener('loadedmetadata', () => {
       let changed = applyMeta(
         it,
@@ -764,23 +1023,50 @@ function probe(it) {
       }
       if (changed) scheduleRender();
     });
-    v.addEventListener('loadeddata', finish);
-    v.addEventListener('error', finish);
+    v.addEventListener('loadeddata', () => finish(true));
+    v.addEventListener('error', () => {
+      v.removeAttribute('src'); // stop it from trying again on its own
+      finish(false);
+    });
     v.src = url.includes('#') ? url : `${url}#t=1`;
   });
 }
 
+function hasThumb(it) {
+  const t = thumbCache.get(it.url);
+  return it.kind === 'gif' ? !!t?.classList?.contains('has-still') : t instanceof HTMLVideoElement;
+}
+
+/**
+ * Queue a thumbnail/metadata load, if it's worth one right now (see
+ * wantProbe). Called when an item scrolls into view, and for every item when
+ * sorting by length or resolution.
+ */
 function queueProbe(it) {
-  if (!canProbe(it)) return;
-  if (it.kind === 'gif') {
-    if (gifProbeCount >= MAX_GIF_PROBES || thumbCache.get(it.url)?.classList?.contains('has-still')) return;
-    gifProbeCount++;
-  } else {
-    if (probeCount >= MAX_PROBES || thumbCache.get(it.url) instanceof HTMLVideoElement) return;
-    probeCount++;
-  }
+  if (!canProbe(it) || probeQueued.has(it.url) || hasThumb(it) || !wantProbe(it)) return;
+  const gif = it.kind === 'gif';
+  // Caps for Auto; "All files" in Settings means all of them.
+  if (cfg.thumbnails !== 'all' && (gif ? gifProbeCount >= MAX_GIF_PROBES : probeCount >= MAX_PROBES)) return;
+  gif ? gifProbeCount++ : probeCount++;
+  const url = it.url;
   const gen = generation;
-  probeQueue.push(() => (gen === generation ? probe(it) : null));
+  probeQueued.add(url);
+  const release = () => {
+    // Not loaded: let it be queued again the next time it comes into view.
+    if (gen !== generation) return;
+    probeQueued.delete(url);
+    gif ? gifProbeCount-- : probeCount--;
+  };
+  netSchedule(
+    url,
+    async () => {
+      if (gen !== generation) return;
+      if (it.url !== url || !wantProbe(it)) return release(); // scrolled away, or no longer needed
+      const strikes = hostEntry(hostOf(url)).strikes;
+      if ((await probe(it)) === false) await checkFailedLoad(url, strikes);
+    },
+    { prio: () => 2 + screenPrio(it), giveUp: release }
+  );
 }
 
 async function fetchWithTimeout(url, opts, ms) {
@@ -793,40 +1079,86 @@ async function fetchWithTimeout(url, opts, ms) {
   }
 }
 
+/** File size from the server, or null. Throws RateLimited if the site refuses. */
 async function fetchSize(url) {
-  try {
-    const { res } = await fetchWithTimeout(url, { method: 'HEAD' }, 6000);
-    const n = Number(res.headers.get('content-length'));
-    if (res.ok && n > 0) return n;
-  } catch {
-    /* fall through to range request */
+  const h = hostEntry(hostOf(url));
+  // Some servers reject HEAD; after two refusals, go straight to the range request.
+  if (h.headFails < 2) {
+    try {
+      const { res } = await fetchWithTimeout(url, { method: 'HEAD' }, 6000);
+      checkLimited(res);
+      const n = Number(res.headers.get('content-length'));
+      if (res.ok && n > 0) return n;
+      if (!res.ok) h.headFails++;
+    } catch (e) {
+      if (e instanceof RateLimited) throw e;
+      /* fall through to range request */
+    }
   }
   try {
     const { res, ctrl } = await fetchWithTimeout(url, { headers: { Range: 'bytes=0-0' } }, 6000);
+    checkLimited(res, ctrl);
     const cr = res.headers.get('content-range');
     let n = cr ? Number(cr.split('/')[1]) : 0;
     if (!n && res.status === 200) n = Number(res.headers.get('content-length'));
     ctrl.abort();
     return n > 0 ? n : null;
-  } catch {
+  } catch (e) {
+    if (e instanceof RateLimited) throw e;
     return null;
   }
 }
 
 function queueSize(it) {
+  if (it.sizeState === 'skipped' && cfg.lookUpSizes) it.sizeState = 'pending'; // setting turned back on
   if (it.sizeState !== 'pending') return;
   const gen = generation;
-  sizeQueue.push(async () => {
-    if (gen !== generation || it.sizeState !== 'pending') return;
-    const url = it.url;
-    it.sizeState = 'loading';
-    const size = sizeCache.has(url) ? sizeCache.get(url) : await fetchSize(url);
-    sizeCache.set(url, size);
-    if (gen !== generation || it.url !== url) return; // main link changed meanwhile
-    if (it.size == null) it.size = size;
-    it.sizeState = it.size != null ? 'done' : 'na';
+  const url = it.url;
+  if (sizeCache.has(url)) {
+    finishSize(it, sizeCache.get(url));
+    return;
+  }
+  if (!cfg.lookUpSizes) {
+    it.sizeState = 'skipped'; // Settings: only sizes the page revealed
     scheduleRender();
-  });
+    return;
+  }
+  it.sizeState = 'queued';
+  netSchedule(
+    url,
+    async () => {
+      if (gen !== generation || it.sizeState !== 'queued') return;
+      if (!cfg.lookUpSizes) {
+        it.sizeState = 'skipped'; // turned off in Settings meanwhile
+        return;
+      }
+      if (it.url !== url) {
+        it.sizeState = 'pending';
+        return queueSize(it); // main link changed meanwhile
+      }
+      it.sizeState = 'loading';
+      let size;
+      try {
+        size = await fetchSize(url);
+      } catch (e) {
+        it.sizeState = 'queued'; // retried after the pause
+        throw e;
+      }
+      sizeCache.set(url, size);
+      if (size != null) saveProbeCache();
+      if (gen === generation && it.url === url) finishSize(it, size);
+    },
+    {
+      prio: () => screenPrio(it),
+      giveUp: () => gen === generation && finishSize(it, null),
+    }
+  );
+}
+
+function finishSize(it, size) {
+  if (it.size == null) it.size = size;
+  it.sizeState = it.size != null ? 'done' : 'na';
+  scheduleRender();
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,7 +1339,7 @@ function actionsHTML(it, { labels = true, open = true } = {}) {
 }
 
 function sizeText(it) {
-  if (it.sizeState === 'pending' || it.sizeState === 'loading') return '…';
+  if (['pending', 'queued', 'loading'].includes(it.sizeState)) return '…';
   return formatSize(it.size);
 }
 
@@ -1040,7 +1372,7 @@ const views = {
     return `<div class="view-icons">${items
       .map(
         (it) => `
-        <div class="card${newCls(it)}"${newStyle(it)}>
+        <div class="card${newCls(it)}"${newStyle(it)} data-item="${it.id}">
           ${thumbHTML(it, { overlays: true })}
           <div class="name" title="${esc(it.name)}">${esc(it.name)}</div>
           ${linkHTML(it)}
@@ -1055,7 +1387,7 @@ const views = {
     return `<div class="view-tiles">${items
       .map(
         (it) => `
-        <div class="tile${newCls(it)}"${newStyle(it)}>
+        <div class="tile${newCls(it)}"${newStyle(it)} data-item="${it.id}">
           ${thumbHTML(it, { overlays: true })}
           <div class="info">
             <div class="name" title="${esc(it.name)}">${esc(it.name)} ${badges(it)}</div>
@@ -1082,7 +1414,7 @@ const views = {
     return `<div class="view-list">${items
       .map(
         (it) => `
-        <div class="row${newCls(it)}"${newStyle(it)}>
+        <div class="row${newCls(it)}"${newStyle(it)} data-item="${it.id}">
           <span class="ficon" data-preview="${it.id}">${fileIcon(it)}</span>
           <span class="name hoverable" data-preview="${it.id}">${esc(it.name)}</span>
           ${linkHTML(it)}
@@ -1096,7 +1428,7 @@ const views = {
   details(items) {
     const cols = [
       { key: 'name', label: 'Name', w: '20%' },
-      { key: 'type', label: 'Type', w: '60px' },
+      { key: 'type', label: 'Type', w: '68px' },
       { key: 'size', label: 'Size', w: '66px' },
       { key: 'resolution', label: 'Resolution', w: '80px' },
       { key: 'duration', label: 'Length', w: '62px' },
@@ -1119,7 +1451,7 @@ const views = {
         <tbody>${items
           .map(
             (it) => `
-            <tr class="${newCls(it).trim()}"${newStyle(it)}>
+            <tr class="${newCls(it).trim()}"${newStyle(it)} data-item="${it.id}">
               <td><div class="name hoverable" data-preview="${it.id}">${esc(it.name)}</div></td>
               <td><span class="badge${it.playlist || it.blobKind === 'stream' ? ' stream' : ''}">${esc(it.format)}</span></td>
               <td class="num">${sizeText(it)}</td>
@@ -1202,6 +1534,7 @@ function renderContent(groups) {
       if (el.classList?.contains('playing') && slot.dataset.thumb !== hoverThumbId) setGifPlaying(slot, false);
     }
   }
+  observeItems();
 }
 
 /** Status bar, kind counts, Formats button and footer buttons. */
@@ -1214,7 +1547,7 @@ function renderChrome(groups = displayGroups()) {
     b.querySelector('.n').textContent = state.scanning ? '' : counts[b.dataset.kind];
   }
   const known = state.items.reduce((s, it) => s + (it.size || 0), 0);
-  const pendingSizes = state.items.some((it) => it.sizeState === 'pending' || it.sizeState === 'loading');
+  const pendingSizes = state.items.some((it) => ['pending', 'queued', 'loading'].includes(it.sizeState));
   let status = state.scanning ? 'Scanning…' : countLabel(state.items);
   if (!state.scanning && known) status += ` · ${formatSize(known)}${pendingSizes ? '+' : ''}`;
   if (list.length !== total) status += ` · ${list.length} shown`;
@@ -1266,6 +1599,7 @@ function setPref(key, value) {
   // Only choosing how to sort or group rearranges the list.
   if (key === 'sortBy' || key === 'sortDir' || key === 'groupBy') arrange();
   render();
+  if (key === 'sortBy' && needsAllMeta()) state.items.forEach(queueProbe);
 }
 
 // ---------------------------------------------------------------------------
@@ -1415,12 +1749,33 @@ els.downloadAll.addEventListener('click', async () => {
   clearTimeout(confirmTimer);
   state.confirmAll = false;
   els.downloadAll.disabled = true;
+  // Regular files go to the background worker, which runs a few at a time (so
+  // the site doesn't answer "too many requests") and keeps going after the
+  // popup closes. In-page (blob:) files have to be saved from the page itself.
+  const blobs = list.filter((it) => it.isBlob);
+  const names = uniqueFilenames(list);
+  const files = list.filter((it) => !it.isBlob).map((it) => ({ url: it.url, filename: names.get(it.id) }));
+  let queued = 0;
+  if (files.length) {
+    try {
+      queued = (await chrome.runtime.sendMessage({ type: 'downloadAll', files }))?.queued || 0;
+    } catch (e) {
+      toast(`Download failed: ${e.message || e}`);
+    }
+  }
   let ok = 0;
-  for (const it of list) {
+  for (const it of blobs) {
     if (await download(it)) ok++;
     await new Promise((r) => setTimeout(r, 150));
   }
-  toast(`Started ${ok} of ${list.length} downloads`);
+  const total = queued + ok;
+  if (total) {
+    toast(
+      queued > cfg.downloadsTotal
+        ? `Downloading ${total} files, ${cfg.downloadsTotal} at a time. You can close this window.`
+        : `Started ${total} of ${list.length} downloads`
+    );
+  }
   renderChrome();
 });
 
@@ -1610,16 +1965,19 @@ function commandsFor(it, os, file = makeFilename(it)) {
   const opt = (flag, v, sep = ' ') => (v ? ` ${flag}${sep}${q(v)}` : '');
 
   const curl = os === 'win' ? 'curl.exe' : 'curl';
+  // Retry options and aria2c connections come from the settings page.
+  const retry = cfg.commandRetry;
+  const conns = cfg.ariaConnections;
   const cmds = {
     curl: {
       label: 'curl',
       desc: os === 'win' ? 'Built into Windows 10 and 11' : 'Built into macOS and most Linux',
-      cmd: `${curl} -fL -o ${q(file)}${opt('-H', ref && `Referer: ${ref}`)}${opt('-A', ua)} ${url}`,
+      cmd: `${curl} -fL${retry ? ' --retry 3' : ''} -o ${q(file)}${opt('-H', ref && `Referer: ${ref}`)}${opt('-A', ua)} ${url}`,
     },
     wget: {
       label: 'wget',
       desc: 'Most Linux; on macOS: brew install wget',
-      cmd: `wget -O ${q(file)}${opt('--referer', ref, '=')}${opt('--user-agent', ua, '=')} ${url}`,
+      cmd: `wget${retry ? ' --tries=3 --waitretry=10 --retry-on-http-error=429,503' : ''} -O ${q(file)}${opt('--referer', ref, '=')}${opt('--user-agent', ua, '=')} ${url}`,
     },
     powershell: {
       label: 'PowerShell',
@@ -1638,8 +1996,8 @@ function commandsFor(it, os, file = makeFilename(it)) {
     },
     aria2c: {
       label: 'aria2c',
-      desc: 'Faster: 8 connections at once (needs aria2)',
-      cmd: `aria2c -x 8 -s 8${opt('--referer', ref, '=')}${opt('--user-agent', ua, '=')} -o ${q(file)} ${url}`,
+      desc: conns > 1 ? `Faster: ${conns} connections at once (needs aria2)` : 'One connection (needs aria2)',
+      cmd: `aria2c -x ${conns} -s ${conns}${retry ? ' --retry-wait=10 --max-tries=5' : ''}${opt('--referer', ref, '=')}${opt('--user-agent', ua, '=')} -o ${q(file)} ${url}`,
     },
     ffmpeg: {
       label: 'ffmpeg',
@@ -1687,7 +2045,7 @@ function uniqueFilenames(items) {
 /**
  * Commands for many files at once. One line per file (pasting runs them one
  * after another), except aria2c, which gets the whole list on stdin and
- * downloads 4 files at a time. Streaming playlists always get an ffmpeg line
+ * downloads 2 files at a time (more tends to trip "too many requests"). Streaming playlists always get an ffmpeg line
  * (or yt-dlp), since curl/wget would only save the playlist file.
  */
 function batchCommandsFor(items, os) {
@@ -1709,7 +2067,7 @@ function batchCommandsFor(items, os) {
     wget: 'One command per file, one after another',
     powershell: 'One command per file, nothing to install',
     ytdlp: 'One command per file (needs yt-dlp)',
-    aria2c: '4 files at a time, usually fastest (needs aria2)',
+    aria2c: '2 files at a time, usually fastest (needs aria2)',
   };
   const label = { curl: 'curl', wget: 'wget', powershell: 'PowerShell', ytdlp: 'yt-dlp', aria2c: 'aria2c' };
 
@@ -1720,7 +2078,8 @@ function batchCommandsFor(items, os) {
       if (files.length) {
         // aria2 input list: a link, then indented options for that link.
         const list = files.map((it) => `${it.url}\n  out=${names.get(it.id)}`).join('\n');
-        const head = `aria2c -x 8 -s 8 -j 4${opt('--referer', ref)}${opt('--user-agent', ua)} -i -`;
+        const bc = cfg.ariaBatchConnections;
+        const head = `aria2c -j 2 -x ${bc} -s ${bc}${cfg.commandRetry ? ' --retry-wait=10 --max-tries=5' : ''}${opt('--referer', ref)}${opt('--user-agent', ua)} -i -`;
         parts.push(
           os === 'win'
             ? `@'\n${list}\n'@ | ${head}`
@@ -1933,6 +2292,10 @@ async function init() {
     /* defaults */
   }
   syncControls();
+  applySettings(await loadSettings(), { initial: true });
+  watchSettings((s) => applySettings(s));
+  await loadProbeCache();
+  await listenForRateLimits();
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   state.tab = tab;
@@ -1941,6 +2304,48 @@ async function init() {
   els.pageInfo.title = tab?.url || '';
   await scan();
   startLiveUpdates();
+}
+
+/** Settings changed (or were just loaded): apply them to what's already in the list. */
+function applySettings(s, { initial = false } = {}) {
+  const before = cfg;
+  cfg = resolve(s);
+  if (initial) return;
+  if (before.thumbnails === 'off' && cfg.thumbnails !== 'off') {
+    for (const [url, el] of thumbCache) if (el == null) thumbCache.delete(url); // posters skipped while Off
+  }
+  if (cfg.onLimit !== 'stop') for (const h of hosts.values()) h.stopped = false;
+  render();
+  for (const it of state.items) {
+    queueSize(it);
+    queueProbe(it);
+  }
+  for (const h of hosts.values()) pumpHost(h);
+  renderNetNote();
+}
+
+/**
+ * The background worker sees the status of every response, including the
+ * page's own and the thumbnails' (which media elements hide), and reports
+ * sites that answer "too many requests".
+ */
+async function listenForRateLimits() {
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type === 'rateLimited' && msg.host) rateLimit(hostEntry(msg.host), msg.ms ?? null);
+  });
+  try {
+    const limits = await chrome.runtime.sendMessage({ type: 'getRateLimits' });
+    for (const [host, l] of Object.entries(limits || {})) {
+      if (!(l.until > Date.now())) continue;
+      const h = hostEntry(host);
+      h.until = l.until;
+      h.slowUntil = l.until + NET.slowForMs;
+      h.strikes = Math.max(h.strikes, l.strikes || 1);
+    }
+    startNetTicker();
+  } catch {
+    /* background not ready: it will still send new notices */
+  }
 }
 
 // ---------------------------------------------------------------------------
