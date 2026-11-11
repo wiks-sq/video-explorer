@@ -17,7 +17,6 @@ Click the toolbar icon to see every video file and GIF on the current page. Each
 4. Pin **Video Explorer** from the puzzle-piece menu so it's always visible.
 
 ## Views (like a file explorer)
-
 | View | What you get |
 |---|---|
 | **Large icons** | Thumbnail grid with format and duration overlays |
@@ -41,6 +40,10 @@ Click the toolbar icon to see every video file and GIF on the current page. Each
 - **Hover preview:** hold the mouse over a thumbnail (or over a file name in List and Details) and a small window plays the video or GIF. It starts muted. If you move the mouse into the window you can use its controls, including unmuting and full screen. Once you unmute, later previews keep the sound on. Press `Esc` to close it. 
 - **Live updates:** while the popup is open, the list keeps updating. New videos are added as the page inserts them, as a player loads them, or as they show up in network traffic. Each one gets a short highlight and a "new video found" message, and the footer shows a green **LIVE** dot. Navigating to a new page starts the list fresh.
 - **Download all** downloads every file that matches the current filter. It asks you to confirm when there are more than 3. Files download 4 at a time (at most 2 from one site), and the rest wait their turn. This keeps going after you close the popup. **Copy all links** copies them as one link per line.
+
+<p align="center">
+  <img width="640" height="420" alt="screenshot-3-details" src="https://github.com/user-attachments/assets/b3e2a063-d1a2-4bfa-9426-c54651c16aba" />
+</p>
 
 ## Turning it off
 
