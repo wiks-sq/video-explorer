@@ -2,6 +2,13 @@
 
 Click the toolbar icon to see every video file and GIF on the current page. Each one has its link, a download button, a copy-link button and an open-in-tab button.
 
+<p align="center">
+  <a href="https://buymeacoffee.com/marginnotes" target="_blank">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee">
+  </a>
+</p>
+
+
 ## Install
 
 1. Open `chrome://extensions`.
