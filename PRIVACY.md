@@ -35,5 +35,3 @@ Video Explorer uses the data above only to show and download the videos and GIFs
 ## Changes and contact
 
 If this policy changes, the new version will be published at this address with a new effective date.
-
-Questions: open an issue at <https://github.com/wiks-sq/video-explorer/issues>.
