@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Video Explorer</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="title-block">
+        <h1>Video Explorer</h1>
+        <p id="page-info" class="muted">Scanning…</p>
+      </div>
+      <div class="seg kinds" id="kind-switch" role="radiogroup" aria-label="Show">
+        <button data-kind="all" role="radio">All <span class="n"></span></button>
+        <button data-kind="video" role="radio">Videos <span class="n"></span></button>
+        <button data-kind="gif" role="radio">GIFs <span class="n"></span></button>
+      </div>
+      <button id="rescan" class="icon-btn" title="Rescan page">
+        <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" /></svg>
+      </button>
+    </header>
+
+    <div class="toolbar">
+      <div class="search">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+        <input id="filter" type="search" placeholder="Filter…" title="Filter by name or link (press / to jump here)" />
+      </div>
+
+      <div class="fmt-menu">
+        <button id="formats" class="fmt-btn" aria-haspopup="true" aria-expanded="false" aria-controls="formats-pop" title="Choose which formats are listed">
+          <svg viewBox="0 0 24 24"><path d="M4 5h16l-6 7.5V19l-4-2v-4.5z" /></svg>
+          <span>Formats</span>
+          <span id="formats-hidden" class="pill" hidden></span>
+        </button>
+        <div id="formats-pop" class="fmt-pop" role="dialog" aria-label="Formats to show" hidden></div>
+      </div>
+
+      <div class="seg" id="view-switch" role="radiogroup" aria-label="View">
+        <button data-view="icons" title="Large icons" role="radio">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5" /><rect x="13" y="3" width="8" height="8" rx="1.5" /><rect x="3" y="13" width="8" height="8" rx="1.5" /><rect x="13" y="13" width="8" height="8" rx="1.5" /></svg>
+        </button>
+        <button data-view="tiles" title="Tiles" role="radio">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="6" rx="1.2" /><rect x="3" y="14" width="7" height="6" rx="1.2" /><path d="M13 6h8M13 9h5M13 16h8M13 19h5" /></svg>
+        </button>
+        <button data-view="list" title="List" role="radio">
+          <svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13" /><circle cx="4" cy="6" r="1" /><circle cx="4" cy="12" r="1" /><circle cx="4" cy="18" r="1" /></svg>
+        </button>
+        <button data-view="details" title="Details" role="radio">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1.5" /><path d="M3 9h18M3 14.5h18M10 4v16M16 4v16" /></svg>
+        </button>
+      </div>
+
+      <label class="select">
+        <span>Group</span>
+        <select id="group-by">
+          <option value="none">None</option>
+          <option value="type">Type</option>
+          <option value="domain">Domain</option>
+          <option value="source">Found via</option>
+          <option value="size">Size</option>
+        </select>
+      </label>
+
+      <label class="select">
+        <span>Sort</span>
+        <select id="sort-by">
+          <option value="order">Page order</option>
+          <option value="name">Name</option>
+          <option value="size">Size</option>
+          <option value="type">Type</option>
+          <option value="duration">Duration</option>
+          <option value="resolution">Resolution</option>
+          <option value="domain">Domain</option>
+        </select>
+      </label>
+      <button id="sort-dir" class="icon-btn small" title="Ascending">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M6 11l6-6 6 6" /></svg>
+      </button>
+    </div>
+
+    <main id="content" tabindex="-1"></main>
+
+    <footer class="statusbar">
+      <span id="live" class="live" title="The list updates automatically as the page loads more videos" hidden><i></i>Live</span>
+      <button id="resort" class="resort-btn" title="The list keeps its order while it updates, and new files are added at the bottom. Click to sort everything again." hidden>Sort again</button>
+      <span id="status" class="muted"></span>
+      <div class="footer-actions">
+        <button id="copy-all" class="btn">Copy all links</button>
+        <div class="split footer-split">
+          <button id="download-all" class="btn primary">Download all</button>
+          <button id="download-all-menu" class="btn primary caret" aria-haspopup="menu" aria-expanded="false" title="Copy download commands for all shown files (curl, wget, PowerShell, yt-dlp, aria2c)">
+            <svg viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></svg>
+          </button>
+        </div>
+      </div>
+    </footer>
+
+    <div id="preview" class="preview" hidden>
+      <div class="pv-media">
+        <video id="pv-video" playsinline loop controls preload="auto"></video>
+        <img id="pv-img" class="pv-img" alt="" />
+        <div id="pv-msg" class="pv-msg"></div>
+        <div class="pv-spinner" aria-hidden="true"></div>
+      </div>
+      <div class="pv-info">
+        <div id="pv-name" class="pv-name"></div>
+        <div id="pv-meta" class="pv-meta"></div>
+      </div>
+    </div>
+
+    <div id="cmd-menu" class="cmd-menu" role="menu" aria-label="Download commands" hidden></div>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

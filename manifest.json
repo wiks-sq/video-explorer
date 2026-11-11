@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Video Explorer",
+  "version": "1.0.0",
+  "description": "List every video and GIF on the current page, browse them in explorer-style views, preview, copy links and download.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Video Explorer",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads",
+    "webRequest",
+    "webNavigation",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": ["<all_urls>"]
+}
