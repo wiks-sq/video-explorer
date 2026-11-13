@@ -115,7 +115,6 @@ If a site still struggles, set **Thumbnails and lengths** to Off and **File size
 - `options.html / options.css / options.js`: the settings page
 - `settings.js`: setting defaults and what they mean, shared by the popup, the settings page and the background worker
 - `icons/`: toolbar icons, with grey `-off` versions for when it's switched off
-- `store/`: Chrome Web Store screenshots and promo tiles, and the logo as SVG (`logo.svg`, and `logo-16.svg` for the small sizes)
 
 ## License
 
