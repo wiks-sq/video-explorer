@@ -24,6 +24,8 @@ Click the toolbar icon to see every video file and GIF on the current page. Each
 | **List** | One compact row per file: name, link, size |
 | **Details** | Table with Name, Type, Size, Resolution, Length, Found via and Link. Click a column header to sort |
 
+- **Full tab:** the ⤢ button at the top right opens the same explorer in a tab of its own, using the whole window. It keeps listing the page it was opened from, and updates live like the popup. Clicking the button again switches to that tab instead of opening another. If you close the page's tab, the full tab keeps the list of what was found.
+- **Picks up where you left off:** close the popup (or the full tab) and open it again on the same page, and it scrolls back to the file you were looking at. Switching between views keeps that file at the top too. This is kept until the browser closes.
 - **All / Videos / GIFs:** the switch at the top right picks what to show and how many of each were found. Download all and Copy all links only use what's shown.
 - **Formats:** the Formats button next to the search box opens a checklist of every format found on the page (MP4, WebM, GIF, M4S, M3U8…) with how many of each there are. Untick a format to hide it, use **Only** to show just one, or **Show all** to reset. Hidden formats are remembered, so hiding M4S once keeps segments out of the list on every site. When something is hidden, the button turns blue and shows how many formats are hidden. Download all and Copy all links only use what's shown.
 - **Group by:** None, Type (MP4/WebM/GIF/HLS…), Domain, Found via (video tag, link, network…), Size range. Click a group header to collapse it.
@@ -37,6 +39,8 @@ Click the toolbar icon to see every video file and GIF on the current page. Each
   - By default the commands send the page as `Referer` and your browser's `User-Agent`, which many sites require. Untick the box in the menu to leave them out. Cookies are never included; if a site needs you to be logged in, try `yt-dlp --cookies-from-browser chrome <link>`.
   - **Download all** has the same ▾. It copies commands for every file currently shown, so search, the All / Videos / GIFs switch and the Formats menu decide what's included. curl, wget, PowerShell and yt-dlp get one line per file, run one after another. aria2c gets the whole list at once and downloads 2 files at a time. Streaming playlists in the list get an ffmpeg line (or yt-dlp) automatically. Files that would end up with the same name are numbered (`episode10.mp4`, `episode10 (2).mp4`) so nothing gets overwritten. `blob:` files can't be included, and the menu says how many were left out.
   - Everything is single-quoted for the chosen shell, so links with `&`, `$`, spaces or quotes paste safely. `blob:` and inline items have no link a command could use, so their ▾ is disabled.
+- **Thumbnails** are a small still of each video at 1 second (or the page's own poster), not a playing copy of the video, so pages with dozens of videos stay light.
+- **Too large to preview:** videos above 1440p and GIFs over 20 MB get no thumbnail and no hover preview, only "Too large to preview" and a Download button. Showing a single 4K frame takes 33 MB of memory and a GIF is decoded whole, and a page full of them could crash the popup. Their size, resolution and length are still listed. The limit can be raised to 4K or turned off on the settings page.
 - **Hover preview:** hold the mouse over a thumbnail (or over a file name in List and Details) and a small window plays the video or GIF. It starts muted. If you move the mouse into the window you can use its controls, including unmuting and full screen. Once you unmute, later previews keep the sound on. Press `Esc` to close it. 
 - **Live updates:** while the popup is open, the list keeps updating. New videos are added as the page inserts them, as a player loads them, or as they show up in network traffic. Each one gets a short highlight and a "new video found" message, and the footer shows a green **LIVE** dot. Navigating to a new page starts the list fresh.
 - **Download all** downloads every file that matches the current filter. It asks you to confirm when there are more than 3. Files download 4 at a time (at most 2 from one site), and the rest wait their turn. This keeps going after you close the popup. **Copy all links** copies them as one link per line.
@@ -80,6 +84,7 @@ The settings page has no button in the popup. To open it, right-click the Video 
 | Setting | Auto | Other choices |
 | --- | --- | --- |
 | Thumbnails and lengths | As files scroll into view | All files when the popup opens; Off (no thumbnails and no requests for them; hover previews still play) |
+| Largest file to preview | Videos up to 1440p, GIFs up to 20 MB | Videos up to 4K, GIFs up to 60 MB; No limit (may crash on pages with big files) |
 | File sizes | Look up missing sizes | Only what the page revealed (no requests) |
 | Requests at once, per site | 2, or 1 after a refusal | 1 to 8, fixed |
 | Pause between requests | 0.25 s, or 1.5 s after a refusal | None to 2 s, fixed |

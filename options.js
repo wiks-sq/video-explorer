@@ -52,6 +52,15 @@ const SECTIONS = [
         ],
       },
       {
+        key: 'previewLimit',
+        label: 'Largest file to preview',
+        options: [
+          n('auto', 'Auto: videos up to 1440p, GIFs up to 20 MB', 'Bigger files show “Too large to preview” instead of a thumbnail or hover preview, with a button to download them. Every frame of a 4K video takes 33 MB of memory to show, and a GIF is decoded whole, so many of them can crash the popup.'),
+          n('4k', 'Videos up to 4K, GIFs up to 60 MB', 'Thumbnails and previews for 4K videos too.', 'Pages with many 4K videos or huge GIFs may crash the popup or the full tab.'),
+          n('none', 'No limit', 'Every file gets a thumbnail and a preview, however big.', 'Pages with large videos or GIFs can crash the popup or the full tab.'),
+        ],
+      },
+      {
         key: 'remember',
         label: 'Remember sizes and lengths',
         options: [

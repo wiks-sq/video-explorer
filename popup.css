@@ -55,6 +55,30 @@ body {
   overflow: hidden;
 }
 
+/* Opened in a tab of its own: fill the window. */
+body.full {
+  width: auto;
+  height: 100vh;
+}
+
+body.full .topbar {
+  padding: 14px 20px 8px;
+}
+
+body.full .toolbar,
+body.full .statusbar {
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
+body.full main {
+  padding: 14px 20px 20px;
+}
+
+body.full #open-page {
+  display: none;
+}
+
 svg {
   width: 16px;
   height: 16px;
@@ -172,6 +196,7 @@ h1 {
 /* Switched off: only the header and the message are left. */
 body.off .kinds,
 body.off #rescan,
+body.off #open-page,
 body.off .toolbar,
 body.off .statusbar {
   display: none;
@@ -397,7 +422,8 @@ main {
 }
 
 .thumb video,
-.thumb img {
+.thumb img,
+.thumb canvas.still {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -431,6 +457,26 @@ main {
   flex-direction: column;
   align-items: center;
   gap: 4px;
+}
+
+.thumb .ph .too-big {
+  padding: 0 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-align: center;
+  color: #c9ccd4;
+}
+
+/* Tiles have small thumbnails: just the words. */
+.tile .ph:has(.too-big) svg,
+.tile .ph:has(.too-big) span:not(.too-big) {
+  display: none;
+}
+
+.pv-msg .pv-dl {
+  display: block;
+  margin: 10px auto 0;
 }
 
 .thumb .ph svg {

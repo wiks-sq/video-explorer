@@ -131,6 +131,7 @@ const $ = (sel) => document.querySelector(sel);
 const els = {
   pageInfo: $('#page-info'),
   rescan: $('#rescan'),
+  openPage: $('#open-page'),
   filter: $('#filter'),
   viewSwitch: $('#view-switch'),
   groupBy: $('#group-by'),
@@ -213,6 +214,19 @@ function countLabel(items) {
 function canProbe(it) {
   return !it.isBlob && !it.playlist && !it.segment;
 }
+
+/**
+ * Why this file is too big to decode here, e.g. "3840×2160", or null. Such
+ * files get no thumbnail frame and no hover playback, only "Download it".
+ * (Settings: Largest file to preview.)
+ */
+function tooBig(it) {
+  if (it.kind === 'gif') return it.size > cfg.maxGifBytes ? formatSize(it.size) : null;
+  return it.width && it.height && it.width * it.height > cfg.maxPreviewPixels ? formatRes(it) : null;
+}
+
+const tooBigMessage = (it, why) =>
+  `Too large to preview here (${why}). Download it to watch it. Decoding files this big can crash the extension.`;
 
 function downloadHint(it) {
   if (!canDownload(it)) return 'This is a live MediaSource stream (blob:) and cannot be saved directly';
@@ -479,7 +493,7 @@ function requestScan(delay = 250) {
 }
 
 async function scan({ manual = false } = {}) {
-  if (!state.tab) return;
+  if (!state.tab || state.tabClosed) return;
   if (scanRunning) {
     scanAgain = true;
     return;
@@ -573,10 +587,7 @@ function resetItems() {
   gifProbeCount = 0;
   probeQueued.clear(); // queued work for the old page is dropped by the generation check
   for (const el of thumbCache.values()) {
-    if (el instanceof HTMLVideoElement) {
-      el.removeAttribute('src');
-      el.load();
-    } else if (el?.classList?.contains('gif-thumb')) {
+    if (el?.classList?.contains('gif-thumb')) {
       el.lastElementChild.removeAttribute('src');
     }
   }
@@ -912,7 +923,7 @@ function paintStill(wrap, source) {
 
 function setGifPlaying(slot, on) {
   const it = state.items.find((x) => x.id === slot.dataset.thumb);
-  if (!it || it.kind !== 'gif') return;
+  if (!it || it.kind !== 'gif' || (on && tooBig(it))) return;
   const wrap = thumbCache.get(it.url);
   if (!wrap?.classList?.contains('gif-thumb')) return;
   const img = wrap.lastElementChild;
@@ -962,6 +973,7 @@ function applyMeta(it, meta, url = it.url) {
 
 /** Load the GIF once to read its size and paint the still first-frame thumbnail. Resolves false if it failed. */
 function probeGif(it) {
+  if (tooBig(it)) return Promise.resolve(true);
   const url = it.url;
   return new Promise((resolve) => {
     const img = new Image();
@@ -988,7 +1000,12 @@ function probeGif(it) {
   });
 }
 
-/** Load a video's metadata and first frame (it becomes the thumbnail). Resolves false if it failed. */
+/**
+ * Load a video's metadata and its frame at 1 s, copy that frame into a small
+ * still (the thumbnail), then shut the video down. A live <video> per
+ * thumbnail holds a full-size frame (33 MB for 4K) and a decoder; dozens of
+ * them can crash the page. Resolves false if it failed.
+ */
 function probe(it) {
   if (it.kind === 'gif') return probeGif(it);
   const url = it.url;
@@ -997,17 +1014,21 @@ function probe(it) {
     v.muted = true;
     v.playsInline = true;
     v.preload = 'metadata';
-    if (it.poster) v.poster = it.poster;
     let done = false;
+    let gotMeta = false;
     const finish = (ok) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      v.removeAttribute('src'); // frees the decoder and the frame
+      v.load();
       resolve(ok);
     };
-    const timer = setTimeout(() => finish(false), 10000);
+    // Metadata but no frame in time: keep the metadata, no still.
+    const timer = setTimeout(() => finish(gotMeta), 10000);
     v.addEventListener('loadedmetadata', () => {
-      let changed = applyMeta(
+      gotMeta = true;
+      const changed = applyMeta(
         it,
         {
           width: v.videoWidth || null,
@@ -1016,25 +1037,54 @@ function probe(it) {
         },
         url
       );
-      // Use the video as the thumbnail (it shows the poster or the frame at 1s).
-      if (v.videoWidth && it.url === url && itemsByKey.get(it.key) === it) {
-        thumbCache.set(url, v);
-        changed = true;
-      }
       if (changed) scheduleRender();
+      // Too big: stop before a frame is decoded.
+      if (tooBig(it)) finish(true);
     });
-    v.addEventListener('loadeddata', () => finish(true));
-    v.addEventListener('error', () => {
-      v.removeAttribute('src'); // stop it from trying again on its own
-      finish(false);
+    v.addEventListener('loadeddata', () => {
+      if (v.videoWidth && it.url === url && itemsByKey.get(it.key) === it) {
+        const current = thumbCache.get(url);
+        const posterOk = current instanceof HTMLImageElement && !(current.complete && !current.naturalWidth);
+        if (it.poster && posterOk) {
+          current.dataset.probed = '1'; // the page's own poster stays the thumbnail
+        } else {
+          const still = makeStill(v);
+          if (still) {
+            thumbCache.set(url, still);
+            scheduleRender();
+          }
+        }
+      }
+      finish(true);
     });
+    v.addEventListener('error', () => finish(false));
     v.src = url.includes('#') ? url : `${url}#t=1`;
   });
 }
 
+/** A small canvas copy of the video's current frame (at most 360 px on its long side). */
+function makeStill(v) {
+  const w = v.videoWidth;
+  const h = v.videoHeight;
+  if (!w || !h) return null;
+  const s = Math.min(1, 360 / Math.max(w, h));
+  const c = document.createElement('canvas');
+  c.className = 'still';
+  c.width = Math.max(1, Math.round(w * s));
+  c.height = Math.max(1, Math.round(h * s));
+  try {
+    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+    return c;
+  } catch {
+    return null;
+  }
+}
+
 function hasThumb(it) {
+  if (tooBig(it)) return true; // nothing more to load
   const t = thumbCache.get(it.url);
-  return it.kind === 'gif' ? !!t?.classList?.contains('has-still') : t instanceof HTMLVideoElement;
+  if (it.kind === 'gif') return !!t?.classList?.contains('has-still');
+  return !!(t?.classList?.contains('still') || t?.dataset?.probed);
 }
 
 /**
@@ -1044,6 +1094,8 @@ function hasThumb(it) {
  */
 function queueProbe(it) {
   if (!canProbe(it) || probeQueued.has(it.url) || hasThumb(it) || !wantProbe(it)) return;
+  // A GIF is downloaded and decoded whole: wait for its size to know whether it's too big.
+  if (it.kind === 'gif' && ['pending', 'queued', 'loading'].includes(it.sizeState)) return;
   const gif = it.kind === 'gif';
   // Caps for Auto; "All files" in Settings means all of them.
   if (cfg.thumbnails !== 'all' && (gif ? gifProbeCount >= MAX_GIF_PROBES : probeCount >= MAX_PROBES)) return;
@@ -1159,6 +1211,7 @@ function finishSize(it, size) {
   if (it.size == null) it.size = size;
   it.sizeState = it.size != null ? 'done' : 'na';
   scheduleRender();
+  if (it.kind === 'gif') queueProbe(it); // was waiting for the size
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,7 +1342,9 @@ function thumbHTML(it, { overlays = false } = {}) {
   const ph = fileIcon(it);
   return `
     <div class="thumb" data-thumb="${it.id}" data-preview="${it.id}">
-      <div class="ph">${ph}<span>${esc(it.format)}</span></div>
+      <div class="ph">${ph}<span>${esc(it.format)}</span>${
+        tooBig(it) ? '<span class="too-big" title="Too large to preview here. Download it to watch it.">Too large to preview</span>' : ''
+      }</div>
       ${overlays ? `<span class="overlay tl">${esc(it.format)}</span>` : ''}
       ${overlays && it.duration != null ? `<span class="overlay br">${formatDuration(it.duration)}</span>` : ''}
     </div>`;
@@ -1535,6 +1590,7 @@ function renderContent(groups) {
     }
   }
   observeItems();
+  restoreSpot();
 }
 
 /** Status bar, kind counts, Formats button and footer buttons. */
@@ -1552,7 +1608,7 @@ function renderChrome(groups = displayGroups()) {
   if (!state.scanning && known) status += ` · ${formatSize(known)}${pendingSizes ? '+' : ''}`;
   if (list.length !== total) status += ` · ${list.length} shown`;
   els.status.textContent = status;
-  els.live.hidden = !!state.scanError || state.scanning;
+  els.live.hidden = !!state.scanError || state.scanning || !!state.tabClosed;
   els.resort.hidden = state.scanning || !list.length || !outOfOrder(groups);
   renderFormats();
 
@@ -1593,12 +1649,21 @@ function syncControls() {
 
 function setPref(key, value) {
   hidePreview();
+  // Another view: keep the file you were looking at at the top.
+  const top = key === 'view' && els.content.scrollTop > 0 ? topItem() : null;
+  const topKey = top && state.items.find((x) => x.id === top.el.dataset.item)?.key;
   prefs[key] = value;
   chrome.storage.local.set({ prefs }).catch(() => {});
   syncControls();
   // Only choosing how to sort or group rearranges the list.
   if (key === 'sortBy' || key === 'sortDir' || key === 'groupBy') arrange();
   render();
+  if (topKey) {
+    spot = { key: topKey, offset: 0 };
+    spotUntil = 0;
+    restoreSpot();
+    spot = null;
+  }
   if (key === 'sortBy' && needsAllMeta()) state.items.forEach(queueProbe);
 }
 
@@ -2341,14 +2406,160 @@ async function init() {
   await loadProbeCache();
   await listenForRateLimits();
 
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = await targetTab();
   state.tab = tab;
-  const host = safeURL(tab?.url || '')?.hostname;
-  els.pageInfo.textContent = [tab?.title, host].filter(Boolean).join(' — ') || 'Current tab';
-  els.pageInfo.title = tab?.url || '';
+  if (!tab) {
+    showTabGone();
+    return;
+  }
+  showPageInfo();
+  await loadSpot();
   await scan();
   startLiveUpdates();
 }
+
+// ---------------------------------------------------------------------------
+// Full-tab view
+// ---------------------------------------------------------------------------
+
+// The same page, opened in a tab of its own as popup.html?tab=<id of the page's tab>.
+const PAGE_URL = chrome.runtime.getURL('popup.html');
+const fullTabId = Number(new URLSearchParams(location.search).get('tab')) || null;
+if (fullTabId) document.body.classList.add('full');
+
+/** The tab whose videos are listed: the one in ?tab=, or else the active tab. */
+async function targetTab() {
+  try {
+    if (fullTabId) return await chrome.tabs.get(fullTabId);
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // Clicked the toolbar icon while looking at a full-tab view: list that view's page.
+    const viewing = tab?.url?.startsWith(PAGE_URL) && Number(new URL(tab.url).searchParams.get('tab'));
+    if (viewing) return await chrome.tabs.get(viewing).catch(() => tab);
+    return tab;
+  } catch {
+    return null;
+  }
+}
+
+function showPageInfo() {
+  const tab = state.tab;
+  const host = safeURL(tab?.url || '')?.hostname;
+  els.pageInfo.textContent = [tab?.title, host].filter(Boolean).join(' — ') || 'Current tab';
+  els.pageInfo.title = tab?.url || '';
+  if (fullTabId) document.title = tab?.title ? `${tab.title} — Video Explorer` : 'Video Explorer';
+}
+
+function showTabGone() {
+  els.pageInfo.textContent = 'The tab was closed';
+  els.content.innerHTML = `<div class="empty"><div><strong>The tab was closed</strong><p>Open Video Explorer again on the page you want to explore.</p></div></div>`;
+}
+
+els.openPage.addEventListener('click', async () => {
+  if (!state.tab) return;
+  await saveSpot(); // the full tab opens where you were
+  const url = `${PAGE_URL}?tab=${state.tab.id}`;
+  try {
+    // Already open for this tab: switch to it instead of opening another.
+    const [open] = (await chrome.runtime.getContexts?.({ contextTypes: ['TAB'], documentUrls: [url] })) || [];
+    if (open?.tabId > 0) {
+      await chrome.tabs.update(open.tabId, { active: true });
+      await chrome.windows.update(open.windowId, { focused: true });
+    } else {
+      await chrome.tabs.create({ url, windowId: state.tab.windowId, index: state.tab.index + 1 });
+    }
+  } catch {
+    await chrome.tabs.create({ url });
+  }
+  if (!fullTabId) window.close();
+});
+
+// ---------------------------------------------------------------------------
+// Where you left off
+// ---------------------------------------------------------------------------
+
+// The file at the top of the list, saved per page, so reopening the popup (or
+// the full tab) scrolls back to it. Kept until the browser closes.
+const SPOTS_KEY = 'spots';
+const MAX_SPOTS = 50;
+let spot = null; // { key, offset } still to scroll back to
+let spotUntil = 0; // stop trying after this (the file may be gone)
+let spotTimer = null;
+
+const pageKey = () => (state.tab?.url || '').split('#')[0];
+
+async function loadSpot() {
+  try {
+    const { [SPOTS_KEY]: spots } = await chrome.storage.session.get(SPOTS_KEY);
+    spot = spots?.[pageKey()] || null;
+  } catch {
+    spot = null;
+  }
+}
+
+/** The first file whose card or row is (at least partly) at the top of the list. */
+function topItem() {
+  const top = els.content.getBoundingClientRect().top;
+  for (const el of els.content.querySelectorAll('[data-item]')) {
+    const r = el.getBoundingClientRect();
+    if (r.height && r.bottom > top + 1) return { el, offset: Math.round(r.top - top) };
+  }
+  return null;
+}
+
+async function saveSpot() {
+  clearTimeout(spotTimer);
+  if (spot || !state.tab || !firstScanDone) return; // still scrolling back: keep the old spot
+  const t = topItem();
+  const it = t && state.items.find((x) => x.id === t.el.dataset.item);
+  const value = it && els.content.scrollTop > 4 ? { key: it.key, offset: t.offset, at: Date.now() } : null;
+  try {
+    const { [SPOTS_KEY]: stored } = await chrome.storage.session.get(SPOTS_KEY);
+    const spots = stored || {};
+    if (value) spots[pageKey()] = value;
+    else delete spots[pageKey()];
+    const keys = Object.keys(spots).sort((a, b) => spots[b].at - spots[a].at);
+    for (const k of keys.slice(MAX_SPOTS)) delete spots[k];
+    await chrome.storage.session.set({ [SPOTS_KEY]: spots });
+  } catch {
+    /* not remembered this time */
+  }
+}
+
+/** After a render: scroll back to the saved file once it's in the list. */
+function restoreSpot() {
+  if (!spot) return;
+  if (spotUntil && Date.now() > spotUntil) {
+    spot = null; // that file isn't on the page any more
+    return;
+  }
+  const it = state.items.find((x) => x.key === spot.key);
+  const el = it && els.content.querySelector(`[data-item="${it.id}"]`);
+  if (!el || !el.getBoundingClientRect().height) {
+    // Wait a little for later scans (lazy-loaded videos, network finds).
+    if (firstScanDone && !spotUntil) spotUntil = Date.now() + 3000;
+    return;
+  }
+  const top = els.content.getBoundingClientRect().top;
+  els.content.scrollTop += el.getBoundingClientRect().top - top - spot.offset;
+  spot = null;
+}
+
+// Once you scroll yourself, that's the new spot (and any pending scroll-back is dropped).
+for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
+  els.content.addEventListener(type, () => (spot = null), { passive: true });
+}
+document.addEventListener('keydown', (e) => {
+  if (/^(PageUp|PageDown|Home|End|ArrowUp|ArrowDown| )$/.test(e.key)) spot = null;
+});
+els.content.addEventListener(
+  'scroll',
+  () => {
+    clearTimeout(spotTimer);
+    spotTimer = setTimeout(saveSpot, 250);
+  },
+  { passive: true }
+);
+addEventListener('pagehide', () => saveSpot());
 
 /** Settings changed (or were just loaded): apply them to what's already in the list. */
 function applySettings(s, { initial = false } = {}) {
@@ -2359,6 +2570,9 @@ function applySettings(s, { initial = false } = {}) {
     for (const [url, el] of thumbCache) if (el == null) thumbCache.delete(url); // posters skipped while Off
   }
   if (cfg.onLimit !== 'stop') for (const h of hosts.values()) h.stopped = false;
+  if (before.maxPreviewPixels !== cfg.maxPreviewPixels || before.maxGifBytes !== cfg.maxGifBytes) {
+    for (const it of state.items) if (!hasThumb(it)) probeQueued.delete(it.url); // limit raised: load them now
+  }
   render();
   for (const it of state.items) {
     queueSize(it);
@@ -2402,6 +2616,7 @@ function startLiveUpdates() {
     if (!state.tab || msg?.tabId !== state.tab.id) return;
     if (msg.type === 'networkUpdate') requestScan();
     else if (msg.type === 'tabNavigated') {
+      spot = null;
       resetItems();
       requestScan(600);
     }
@@ -2420,13 +2635,20 @@ function startLiveUpdates() {
   // Page finished loading (or a frame did): rescan and re-install watchers.
   chrome.tabs.onUpdated.addListener((tabId, info) => {
     if (tabId !== state.tab?.id) return;
-    if (info.title) {
-      state.tab.title = info.title;
-      const host = safeURL(state.tab.url || '')?.hostname;
-      els.pageInfo.textContent = [info.title, host].filter(Boolean).join(' — ');
-    }
     if (info.url) state.tab.url = info.url;
+    if (info.title) state.tab.title = info.title;
+    if (info.title || info.url) showPageInfo();
     if (info.status === 'complete') requestScan();
+  });
+
+  // The full tab outlives the page's tab: keep the list, stop scanning.
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    if (tabId !== state.tab?.id) return;
+    state.tabClosed = true;
+    els.pageInfo.textContent = `The tab was closed. Showing what was found on ${
+      safeURL(state.tab.url || '')?.hostname || 'it'
+    }.`;
+    els.live.hidden = true;
   });
 
   // Safety net for things nothing else notices (e.g. changes inside shadow DOM).
@@ -2469,10 +2691,24 @@ function previewMeta(it) {
   return metaLine(it, [FORMAT_LABEL[it.format] || it.format, sizeText(it), formatRes(it), formatDuration(it.duration)]);
 }
 
-function setPreviewMessage(text, poster) {
+function setPreviewMessage(text, poster, withDownload = false) {
   pv.el.classList.add('has-msg');
   pv.el.classList.remove('loading');
   pv.msg.textContent = text;
+  if (withDownload) {
+    const wrap = document.createElement('div');
+    wrap.append(pv.msg.firstChild);
+    const b = document.createElement('button');
+    b.className = 'btn primary pv-dl';
+    b.type = 'button';
+    b.textContent = 'Download';
+    b.addEventListener('click', () => {
+      const it = state.items.find((x) => x.id === pv.id);
+      if (it) download(it);
+    });
+    wrap.append(b);
+    pv.msg.replaceChildren(wrap);
+  }
   pv.msg.style.backgroundImage = poster
     ? `linear-gradient(rgba(0,0,0,.6), rgba(0,0,0,.6)), url(${JSON.stringify(poster)})`
     : '';
@@ -2489,7 +2725,12 @@ function showPreview(it, anchor) {
   pv.msg.textContent = '';
   pv.msg.style.backgroundImage = '';
 
-  if (it.kind === 'gif' && !it.isBlob) {
+  const big = tooBig(it);
+  if (big) {
+    stopPreviewImage();
+    stopPreviewVideo();
+    setPreviewMessage(tooBigMessage(it, big), it.poster, true);
+  } else if (it.kind === 'gif' && !it.isBlob) {
     stopPreviewVideo();
     if (pv.img.dataset.url !== it.url) {
       pv.img.dataset.url = it.url;
@@ -2579,6 +2820,11 @@ pv.video.addEventListener('loadedmetadata', () => {
   });
   pv.meta.textContent = previewMeta(it);
   if (changed) scheduleRender();
+  const big = tooBig(it);
+  if (big) {
+    stopPreviewVideo(); // before a frame is decoded
+    setPreviewMessage(tooBigMessage(it, big), it.poster, true);
+  }
 });
 pv.img.addEventListener('load', () => {
   pv.el.classList.remove('loading');

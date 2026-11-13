@@ -11,6 +11,7 @@ export const DEFAULTS = {
   gap: 'auto', // auto | ms         pause between two requests to one site
   onLimit: 'auto', // auto | stop | ignore   when a site answers "too many requests"
   remember: 'auto', // auto | off   keep sizes/lengths until the browser closes
+  previewLimit: 'auto', // auto | 4k | none   largest video/GIF shown in thumbnails and previews
   downloads: 'auto', // auto | 1..8 Download all: files at a time
   downloadRetry: 'auto', // auto | off
   ariaConnections: 'auto', // auto | 1..16
@@ -61,6 +62,10 @@ export function resolve(s) {
     gapAuto: s.gap === 'auto',
     onLimit: s.onLimit, // 'auto' (pause), 'stop', 'ignore'
     remember: s.remember !== 'off',
+    // Bigger files get "Too large to preview" instead of being decoded: a 4K
+    // frame alone is 33 MB, and a GIF is decoded whole.
+    maxPreviewPixels: s.previewLimit === 'none' ? Infinity : s.previewLimit === '4k' ? 4096 * 2304 : 2560 * 1440,
+    maxGifBytes: s.previewLimit === 'none' ? Infinity : (s.previewLimit === '4k' ? 60 : 20) * 1024 * 1024,
     downloadsTotal: num(s.downloads, 4),
     downloadsPerSite: s.downloads === 'auto' ? 2 : num(s.downloads, 2),
     downloadRetries: s.downloadRetry === 'off' ? 0 : 2,

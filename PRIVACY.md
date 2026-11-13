@@ -15,6 +15,7 @@ All of it stays in your browser:
 
 - The list of videos found on each tab is kept in memory only. It's cleared when the tab goes to a new page or closes, and when the browser closes.
 - File sizes, lengths and resolutions it has looked up are kept in memory until the browser closes, so reopening the popup doesn't ask the site again. You can turn this off or clear it on the settings page.
+- Where you left off on each page (the page's address and which file was at the top of the list) is kept in memory until the browser closes, so reopening the popup scrolls back there.
 - Your view choices (layout, sorting, grouping, hidden formats), settings, and whether it's switched on are saved in Chrome's local extension storage on your computer.
 
 ## What it sends, and to whom
